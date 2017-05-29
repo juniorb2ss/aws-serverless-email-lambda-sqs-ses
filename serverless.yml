@@ -1,0 +1,103 @@
+service: aws-nodejs
+
+custom:
+  bucket: lambda-emails-templates
+  region: ${self:provider.region}
+  stage: ${opt:stage, self:provider.stage}
+  prefix: ${self:custom.stage}-${self:service}
+  process: ${self:custom.prefix}-process
+  config: ${self:custom.prefix}-config
+  sqs: ${self:custom.prefix}-emails
+
+provider:
+  name: aws
+  runtime: nodejs6.10
+  stage: dev
+  iamRoleStatements:
+    - Effect: "Allow"
+      Action:
+        - "lambda:InvokeFunction"
+      Resource:
+        - "*"
+    - Effect: "Allow"
+      Action:
+        - s3:GetObject
+        - s3:ListObject
+      Resource: "arn:aws:s3:::${self:custom.bucket}/*"
+    - Effect: Allow
+      Action:
+        - dynamodb:GetItem
+        - dynamodb:PutItem
+      Resource: arn:aws:dynamodb:*:*:table/${self:custom.config}
+    - Effect: Allow
+      Action:
+        - "sqs:*"
+      Resource: arn:aws:sqs:*:*:${self:custom.sqs}
+    - Effect: Allow
+      Action:
+        - ses:SendEmail
+        - ses:SendRawEmail
+      Resource: "*"
+
+functions:
+  api:
+    handler: src/api-request.handler
+    name: ${self:custom.prefix}-api-sendemail
+    memorySize: 128
+    timeout: 10
+    environment:
+      bucket: ${self:custom.bucket}
+      sqs: ${self:custom.sqs}   
+    events: # The Events that trigger this Function
+      - http: # This creates an API Gateway HTTP endpoint which can be used to trigger this function.  Learn more in "events/apigateway"
+          path: email # Path for this endpoint
+          method: post # HTTP method for this endpoint
+          cors: true # Turn on CORS for this endpoint, but don't forget to return the right header in your response
+          private: true # Requires clients to add API keys values in the `x-api-key` header of their request
+  queue:
+    handler: src/process-sqs-queued.handler
+    name: ${self:custom.prefix}-queue-sendemail
+    memorySize: 128
+    timeout: 60
+    environment:
+      bucket: ${self:custom.bucket}
+      sqs: ${self:custom.sqs}
+      worker: ${self:custom.prefix}-send-sendemail    
+    events:
+      - schedule: rate(1 minute)
+
+  send:
+    handler: src/send-email.handler
+    name: ${self:custom.prefix}-send-sendemail
+    memorySize: 256
+    timeout: 60
+    environment:
+      bucket: ${self:custom.bucket}
+
+resources:
+  Resources:
+    EmailTemplateBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${self:custom.bucket}
+
+    EmailsSQS:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: ${self:custom.sqs}
+        MessageRetentionPeriod: 1209600
+        VisibilityTimeout: 60
+
+    Config:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:custom.config}
+        AttributeDefinitions:
+          - AttributeName: key
+            AttributeType: S
+        KeySchema:
+          - AttributeName: key
+            KeyType: HASH
+        ProvisionedThroughput:
+          ReadCapacityUnits: 5
+          WriteCapacityUnits: 5
